@@ -247,6 +247,80 @@ redis-cli lrange dlq:transactional_emails 0 -1
 
 ---
 
+## Section 4: (Optional) Live System Recording
+
+> **Note:** This section is completely optional and carries bonus assessment marks.
+
+- **Loom Video URL:** `[Insert Loom Link Here - Optional Bonus]`
+
+### Step-by-Step Live Demonstration Walkthrough
+
+Follow this 4-step sequence to demonstrate the live transactional email queue, atomic rate limiting, and exponential retry mechanisms:
+
+#### 1. Start the Background Infrastructure (Redis & Database)
+```bash
+# Start Redis and PostgreSQL services via Docker Compose:
+docker compose up -d redis db
+
+# Or verify Redis is reachable:
+redis-cli ping
+```
+
+#### 2. Launch the Celery Worker Daemon
+In a dedicated terminal window:
+```bash
+# Linux / macOS / Docker:
+celery -A config worker --loglevel=info -Q celery,emails
+
+# Windows (solo concurrency pool):
+celery -A config worker --loglevel=info -P solo -Q celery,emails
+```
+
+#### 3. Dispatch Burst of 250 Email Jobs & Inspect Throttling
+In a second terminal window or Django shell (`python manage.py shell`):
+```python
+from tasks import send_transactional_email_task
+from email_queue.models import EmailType
+
+# Submit a burst of 250 jobs to trigger sliding-window rate limiting:
+print("Submitting 250 jobs...")
+for i in range(250):
+    send_transactional_email_task.delay(
+        email_type=EmailType.ORDER_CONFIRMATION,
+        recipient=f"customer{i}@biztech.com",
+        payload={"order_number": f"ORD-LIVE-{i}", "total_amount": 99.95},
+        idempotency_key=f"order_live_key_{i}",
+    )
+print("All 250 jobs dispatched to queue.")
+```
+
+#### 4. Observe Real-Time Throttling, Retries, and Redis State
+In a third terminal window, monitor Redis keys and worker logs:
+```bash
+# 1. Verify active reservations in rolling 60s window strictly cap at 200:
+redis-cli zcard email:rate_limit:provider
+
+# 2. Inspect oldest reservation score and sliding timestamps:
+redis-cli zrange email:rate_limit:provider 0 0 WITHSCORES
+
+# 3. Observe Celery worker output:
+# - First 200 jobs show: [Task ...] Received ORDER_CONFIRMATION -> SENT
+# - Jobs 201-250 show: Provider rate limit reached (Current: 200/200). Deferring task for Xs.
+# - Transient failure test shows: Upstream provider error. Scheduling retry with exponential backoff.
+```
+
+#### 5. Run the Real Redis Integration Test with Docker Compose
+To run the automated integration test against the real Redis instance:
+```bash
+# Ensure Redis container is running:
+docker compose up -d redis
+
+# Run the real Redis integration test:
+pytest section-2-job-queue/tests/test_real_redis_integration.py -v
+```
+
+---
+
 ## Architectural Documentation
 - Section 1 Investigation & Post-Mortem: [`section-1-django-debugging/INVESTIGATION_LOG.md`](./section-1-django-debugging/INVESTIGATION_LOG.md)
 - Section 2 Architecture & Queue Design: [`section-2-job-queue/README.md`](./section-2-job-queue/README.md)
