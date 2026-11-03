@@ -1,0 +1,31 @@
+{
+  "metadata": {
+    "test_user": "assessment.user@biztech.com",
+    "orders_count": 250,
+    "timestamp": "2026-11-03T16:30:13Z",
+    "data_parity_verified": true
+  },
+  "unoptimized": {
+    "endpoint": "/api/orders/summary/unoptimized/",
+    "http_status": 200,
+    "query_count": 5078,
+    "duration_ms": 29353.71,
+    "silk_request_id": "4e293118-d426-4543-a2bb-e5d051cb5c2d",
+    "silk_time_taken_ms": 18949.357,
+    "complexity": "O(N * M) query explosion"
+  },
+  "optimized": {
+    "endpoint": "/api/orders/summary/",
+    "http_status": 200,
+    "query_count": 11,
+    "duration_ms": 225.63,
+    "silk_request_id": "2293d062-d441-4cd0-a5be-1652c3b95eb9",
+    "silk_time_taken_ms": 178.07799999999997,
+    "complexity": "O(1) constant queries"
+  },
+  "improvement": {
+    "query_count_delta": 5067,
+    "query_count_reduction_pct": "99.78%",
+    "latency_reduction_pct": "99.23%"
+  }
+}

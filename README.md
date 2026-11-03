@@ -1,0 +1,150 @@
+# Biz-Tech Analytics: Full-Stack Developer Technical Assessment
+
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
+[![Django 6.1](https://img.shields.io/badge/django-6.1-green.svg)](https://www.djangoproject.com/)
+[![Tests](https://img.shields.io/badge/pytest-passing-success.svg)](./section-1-django-debugging/orders/tests/)
+[![Profiler](https://img.shields.io/badge/profiler-django--silk-purple.svg)](http://127.0.0.1:8000/silk/)
+
+Comprehensive technical solution for the **Biz-Tech Analytics Full-Stack Developer Assessment**.
+
+---
+
+## Repository Structure
+
+```
+biz-tech-analytics-assessment/
+│
+├── section-1-django-debugging/          # Section 1: Broken System Diagnostics & Fix
+│   ├── orders/                          # Django application (Models, Views, Serializers)
+│   │   ├── models.py                    # Customer, Category, Product, Order, OrderItem
+│   │   ├── views.py                     # Optimized & Unoptimized views + Benchmark view
+│   │   ├── serializers.py               # Eager-loading & unoptimized DRF serializers
+│   │   ├── urls.py                      # /api/orders/ routes
+│   │   ├── admin.py                     # Optimized Django Admin interfaces
+│   │   ├── management/commands/         # seed_orders management command
+│   │   └── tests/                       # Pytest test suite (7 tests verifying N+1 fix)
+│   ├── profiler-evidence/               # Genuine Django Silk evidence & SQL logs
+│   │   ├── query_analysis.json          # Machine-readable before/after telemetry
+│   │   ├── before_optimization_sql.txt  # 15,240 lines of unoptimized SQL queries
+│   │   ├── after_optimization_sql.txt   # Exact SQL queries of optimized endpoint
+│   │   ├── silk_benchmark_report.md     # In-depth benchmark analysis report
+│   │   └── how_to_capture_silk_ui.md    # Guide to view Silk Web UI in browser
+│   ├── generate_profiler_evidence.py    # Automated profiling harness
+│   └── INVESTIGATION_LOG.md             # Detailed chronological post-mortem
+│
+├── section-2-job-queue/                 # Section 2: Async Job Queue (Prepared for Part 2)
+│   └── README.md
+│
+├── config/                              # Django Project Configuration
+│   ├── settings.py                      # Dynamic environment settings & Silk config
+│   ├── urls.py                          # Root routing table (/api/orders/, /silk/, /admin/)
+│   ├── wsgi.py
+│   └── asgi.py
+│
+├── DESIGN.md                            # Comprehensive Architecture Design for Section 2
+├── ANSWERS.md                           # Formal assessment written answers
+├── requirements.txt                     # Pinned project dependencies
+├── pytest.ini                           # Test runner configuration
+├── docker-compose.yml                   # Multi-container Docker stack (Web, Postgres, Redis)
+├── Dockerfile                           # Production Python 3.12 container image
+├── .env.example                         # Environment variable template
+├── .gitignore                           # Git ignore rules
+└── README.md                            # Setup guide and quickstart documentation
+```
+
+---
+
+## Quickstart: Run Locally in Under 5 Minutes
+
+### Prerequisites
+- Python 3.12+ (or Docker & Docker Compose)
+- Git
+
+### Option A: Local Python Environment (Fastest)
+
+```bash
+# 1. Clone or navigate into the project directory
+cd biz-tech-analytics-assessment
+
+# 2. Create and activate a virtual environment
+python -m venv .venv
+# On Windows:
+.venv\Scripts\activate
+# On Linux/macOS:
+# source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Copy environment configuration
+cp .env.example .env
+
+# 5. Run database migrations
+python manage.py migrate
+
+# 6. Seed test customer and 250 orders (reproduces assessment scenario)
+python manage.py seed_orders --orders 250
+
+# 7. Start Django development server
+python manage.py runserver
+```
+
+The application is now running at `http://127.0.0.1:8000/`.
+
+---
+
+### Option B: Docker Compose (PostgreSQL + Redis + Django)
+
+```bash
+cd biz-tech-analytics-assessment
+docker compose up -d --build
+docker compose exec web python manage.py seed_orders --orders 250
+```
+
+---
+
+## Verifying Section 1 Implementation
+
+### 1. Execute the Test Suite
+Run the test suite via `pytest`:
+```bash
+pytest
+```
+*Expected result:* **7 tests passing**, verifying:
+- `/api/orders/summary/` returns HTTP 200 and accurate payload schema.
+- Unoptimized view demonstrates the $O(N \times M)$ query explosion (>1,000 queries).
+- Optimized view enforces constant $O(1)$ database queries ($\le 3$ queries).
+- 100% exact data parity between both implementations.
+- Benchmark endpoint returns accurate telemetry.
+
+### 2. View Django Silk Profiler Web UI
+1. Ensure the server is running (`python manage.py runserver`).
+2. Open your browser and navigate to:
+   ```
+   http://127.0.0.1:8000/silk/
+   ```
+3. Trigger the endpoints to inspect requests:
+   - **Optimized (Production):** `http://127.0.0.1:8000/api/orders/summary/`
+   - **Unoptimized (Reproduction):** `http://127.0.0.1:8000/api/orders/summary/unoptimized/`
+   - **Diagnostic Benchmark:** `http://127.0.0.1:8000/api/orders/benchmark/`
+
+---
+
+## Section 1 Performance Summary
+
+| Metric | Unoptimized (Pre-Fix) | Optimized (Post-Fix) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Endpoint** | `/api/orders/summary/unoptimized/` | `/api/orders/summary/` | Drop-in Fix |
+| **Test Volume** | 250 orders | 250 orders | 100% Parity |
+| **Database Queries** | **5,078 queries** | **11 queries (3 business SQL)** | **99.78% reduction** |
+| **Execution Latency** | **29,353.71 ms (29.35s)** | **225.63 ms** | **99.23% faster** |
+
+Full evidence, analysis, and SQL query logs are available in:
+[`section-1-django-debugging/profiler-evidence/`](./section-1-django-debugging/profiler-evidence/)
+
+---
+
+## Architectural Documentation
+- Section 1 Investigation & Post-Mortem: [`section-1-django-debugging/INVESTIGATION_LOG.md`](./section-1-django-debugging/INVESTIGATION_LOG.md)
+- Section 2 Architectural Design: [`DESIGN.md`](./DESIGN.md)
+- Written Assessment Answers: [`ANSWERS.md`](./ANSWERS.md)

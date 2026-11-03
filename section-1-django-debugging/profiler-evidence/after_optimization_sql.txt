@@ -1,0 +1,39 @@
+-- OPTIMIZED ENDPOINT SQL QUERY LOG
+-- Target: /api/orders/summary/?customer_id=1
+-- Orders Count: 250
+-- Total Queries Executed: 11
+-- Total Wall Duration: 225.63 ms
+
+/* [Query #1] Time: 0.000s */
+SELECT "customers"."id", "customers"."name", "customers"."email", "customers"."tier", "customers"."created_at" FROM "customers" WHERE "customers"."id" = 1 ORDER BY "customers"."created_at" DESC LIMIT 1;
+
+/* [Query #2] Time: 0.000s */
+EXPLAIN QUERY PLAN SELECT "customers"."id", "customers"."name", "customers"."email", "customers"."tier", "customers"."created_at" FROM "customers" WHERE "customers"."id" = 1 ORDER BY "customers"."created_at" DESC LIMIT 1;
+
+/* [Query #3] Time: 0.000s */
+SELECT "orders"."id", "orders"."customer_id", "orders"."order_number", "orders"."status", "orders"."shipping_address", "orders"."created_at", COUNT(DISTINCT "order_items"."id") AS "annotated_items_count", (CAST(SUM((CAST(("order_items"."quantity" * "order_items"."unit_price") AS NUMERIC))) AS NUMERIC)) AS "annotated_total_amount", "customers"."id", "customers"."name", "customers"."email", "customers"."tier", "customers"."created_at" FROM "orders" INNER JOIN "customers" ON ("orders"."customer_id" = "customers"."id") LEFT OUTER JOIN "order_items" ON ("orders"."id" = "order_items"."order_id") WHERE "orders"."customer_id" = 1 GROUP BY "orders"."id", "orders"."customer_id", "orders"."order_number", "orders"."status", "orders"."shipping_address", "orders"."created_at", "customers"."id", "customers"."name", "customers"."email", "customers"."tier", "customers"."created_at" ORDER BY "orders"."created_at" DESC;
+
+/* [Query #4] Time: 0.000s */
+EXPLAIN QUERY PLAN SELECT "orders"."id", "orders"."customer_id", "orders"."order_number", "orders"."status", "orders"."shipping_address", "orders"."created_at", COUNT(DISTINCT "order_items"."id") AS "annotated_items_count", (CAST(SUM((CAST(("order_items"."quantity" * "order_items"."unit_price") AS NUMERIC))) AS NUMERIC)) AS "annotated_total_amount", "customers"."id", "customers"."name", "customers"."email", "customers"."tier", "customers"."created_at" FROM "orders" INNER JOIN "customers" ON ("orders"."customer_id" = "customers"."id") LEFT OUTER JOIN "order_items" ON ("orders"."id" = "order_items"."order_id") WHERE "orders"."customer_id" = 1 GROUP BY "orders"."id", "orders"."customer_id", "orders"."order_number", "orders"."status", "orders"."shipping_address", "orders"."created_at", "customers"."id", "customers"."name", "customers"."email", "customers"."tier", "customers"."created_at" ORDER BY "orders"."created_at" DESC;
+
+/* [Query #5] Time: 0.015s */
+SELECT "order_items"."id", "order_items"."order_id", "order_items"."product_id", "order_items"."quantity", "order_items"."unit_price", "products"."id", "products"."category_id", "products"."name", "products"."sku", "products"."price", "products"."weight_grams", "categories"."id", "categories"."name", "categories"."slug" FROM "order_items" INNER JOIN "products" ON ("order_items"."product_id" = "products"."id") INNER JOIN "categories" ON ("products"."category_id" = "categories"."id") WHERE "order_items"."order_id" IN (144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+
+/* [Query #6] Time: 0.000s */
+EXPLAIN QUERY PLAN SELECT "order_items"."id", "order_items"."order_id", "order_items"."product_id", "order_items"."quantity", "order_items"."unit_price", "products"."id", "products"."category_id", "products"."name", "products"."sku", "products"."price", "products"."weight_grams", "categories"."id", "categories"."name", "categories"."slug" FROM "order_items" INNER JOIN "products" ON ("order_items"."product_id" = "products"."id") INNER JOIN "categories" ON ("products"."category_id" = "categories"."id") WHERE "order_items"."order_id" IN (144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
+
+/* [Query #7] Time: 0.000s */
+BEGIN;
+
+/* [Query #8] Time: 0.000s */
+SAVEPOINT "s21928_x2";
+
+/* [Query #9] Time: 0.000s */
+RELEASE SAVEPOINT "s21928_x2";
+
+/* [Query #10] Time: 0.000s */
+SELECT "silk_sqlquery"."id", "silk_sqlquery"."query", "silk_sqlquery"."start_time", "silk_sqlquery"."end_time", "silk_sqlquery"."time_taken", "silk_sqlquery"."identifier", "silk_sqlquery"."request_id", "silk_sqlquery"."traceback", "silk_sqlquery"."analysis" FROM "silk_sqlquery" WHERE "silk_sqlquery"."request_id" = '2293d062-d441-4cd0-a5be-1652c3b95eb9';
+
+/* [Query #11] Time: 0.000s */
+COMMIT;
+
