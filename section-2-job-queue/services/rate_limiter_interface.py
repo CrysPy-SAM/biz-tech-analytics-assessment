@@ -1,5 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -7,7 +8,7 @@ logger = logging.getLogger(__name__)
 class BaseRateLimiter(ABC):
     """
     Abstract interface for rate limiters.
-    Prepares a clean, decoupled boundary for Part 3 Redis sliding-window implementation.
+    Defines the contract for sliding-window capacity reservation.
     """
 
     @abstractmethod
@@ -20,25 +21,31 @@ class BaseRateLimiter(ABC):
 
 
 class PassThroughRateLimiter(BaseRateLimiter):
-    """
-    Default pass-through implementation used during Part 2.
-    The complete Redis atomic sliding-window rate limiter will be integrated in Part 3.
-    """
+    """Pass-through implementation for test bypass when required."""
 
     def acquire(self, key: str, max_limit: int = 200, window_seconds: int = 60) -> bool:
         return True
 
 
-# Default instance
-_active_rate_limiter: BaseRateLimiter = PassThroughRateLimiter()
+_active_rate_limiter: Optional[BaseRateLimiter] = None
 
 
 def get_rate_limiter() -> BaseRateLimiter:
-    """Returns the currently active rate limiter."""
+    """Returns the currently active rate limiter, lazily instantiating default."""
+    global _active_rate_limiter
+    if _active_rate_limiter is None:
+        from .redis_rate_limiter import RedisSlidingWindowRateLimiter
+        _active_rate_limiter = RedisSlidingWindowRateLimiter()
     return _active_rate_limiter
 
 
 def set_rate_limiter(limiter: BaseRateLimiter):
-    """Allows injecting specialized rate limiters (e.g. during Part 3)."""
+    """Allows injecting specialized or mocked rate limiters for testing."""
     global _active_rate_limiter
     _active_rate_limiter = limiter
+
+
+def reset_rate_limiter():
+    """Resets to default RedisSlidingWindowRateLimiter."""
+    global _active_rate_limiter
+    _active_rate_limiter = None

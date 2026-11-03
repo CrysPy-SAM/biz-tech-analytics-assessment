@@ -129,15 +129,13 @@ class SendTransactionalEmailTaskTestCase(TestCase):
         self.mock_provider.simulate_permanent_transient_failure()
 
         # Simulate task invocation where retries has reached max_retries
-        task_instance = send_transactional_email_task
-        with patch.object(task_instance.request, "retries", 5):
-            with patch.object(task_instance, "max_retries", 5):
-                result = task_instance(
-                    email_type=EmailType.OTP,
-                    recipient="exhausted@biztech.com",
-                    payload={"otp_code": "999111"},
-                    idempotency_key="exhausted_key_001",
-                )
+        result = send_transactional_email_task(
+            email_type=EmailType.OTP,
+            recipient="exhausted@biztech.com",
+            payload={"otp_code": "999111"},
+            idempotency_key="exhausted_key_001",
+            provider_retries=5,
+        )
 
         self.assertEqual(result["status"], "DEAD_LETTER")
         self.assertIn("Max retries exceeded", result["reason"])

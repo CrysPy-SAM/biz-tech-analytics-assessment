@@ -117,78 +117,128 @@ Django Silk is fully integrated (`/silk/`). Benchmarking was executed against ge
 
 ---
 
-### 5. Preventative Engineering Recommendations
-1. **Automated Query Budget Tests:** Integrate `django-assert-num-queries` into CI/CD pipelines to assert that list/summary endpoints execute $O(1)$ constant queries regardless of fixture scale.
-2. **Linting & Code Review Gates:** Implement pre-commit checks or AST linters flagging un-prefetched relational access inside serializers.
-3. **Strict Serializer Profiling:** Require Silk or Debug Toolbar query counts in PR descriptions when modifying serializers.
+## SECTION 2 & 3: RATE-LIMITED ASYNC JOB QUEUE & SLIDING WINDOW LIMITER
+
+### 1. How the Limiter Guarantees Maximum 200 Emails per Rolling 60 Seconds
+The rate limiter uses a **Redis Sorted Set (`ZSET`)** where each element's score is its submission millisecond timestamp (`now_ms`), and its member is a unique reservation UUID.
+When evaluating a reservation request:
+1. `ZREMRANGEBYSCORE key -inf (now_ms - 60000)` purges all reservations older than 60 seconds from the current instant.
+2. `ZCARD key` calculates the exact number of active reservations in the rolling 60-second window.
+3. If `current_count < 200`, the transaction inserts the new reservation with `ZADD key now_ms <uuid>` and refreshes key expiration with `PEXPIRE key 65000`.
+4. If `current_count >= 200`, the transaction queries the oldest active reservation via `ZRANGE key 0 0 WITHSCORES` and returns the exact millisecond delta until that slot expires:
+   $$\text{retry\_after\_ms} = (\text{oldest\_ts} + 60000) - \text{now\_ms}$$
+Because time is evaluated continuously rather than at fixed bucket boundaries, boundary bursts (e.g. 200 emails at second 59 and 200 at second 61) are mathematically impossible.
 
 ---
 
-## SECTION 2: DESIGN A RATE-LIMITED ASYNC JOB QUEUE
-
-### 1. Architectural Architecture & Core Components
-- **Broker & Backend:** Celery 5.6+ with Redis 7+ backend.
-- **Worker Configuration:** Dedicated concurrency pool with Redis broker visibility timeout of 3600s.
-- **Modular Services:**
-  - `EmailService`: Decoupled business logic responsible for payload validation, template formatting, state transitions, and audit logging.
-  - `MockEmailBackend`: In-memory configurable testing provider allowing precise simulation of transient errors, permanent failures, and delivery tracking without sending real emails.
-  - `IdempotencyManager`: Redis atomic locks (`SET NX EX`) and persistent database log checking to enforce effective exactly-once delivery.
-  - `DeadLetterService`: Dual-destination dead-letter logging (`DeadLetterEmailJob` model + `dlq:transactional_emails` Redis list).
-  - `RateLimiterInterface`: Modular rate-limiter abstraction preparing for Part 3 Redis Lua sliding-window rate limiting.
+### 2. Why Lua Scripting is Strictly Mandatory
+If the sequence `ZREMRANGEBYSCORE` $\to$ `ZCARD` $\to$ `ZADD` were implemented as separate Python commands:
+- Under concurrent execution (e.g. 20 Celery workers processing burst requests), Worker A and Worker B could both execute `ZCARD` simultaneously when the count is 199.
+- Both workers would read `count = 199 < 200`, both would conclude capacity exists, and both would issue `ZADD`, resulting in 201 emails being dispatched.
+- Under flash sale bursts (2,000 requests in 10s), non-atomic checks create catastrophic race conditions that cause immediate provider rate limit bans.
+- By executing inside a **Redis Lua script**, Redis's single-threaded event loop executes the prune, count, check, and reservation as a single, uninterrupted atomic unit of work with zero interleaving from other clients.
 
 ---
 
-### 2. Retry Logic & Dead-Letter Handling
-1. **Error Categorization:**
-   - *Transient Errors (`TransientEmailProviderError`):* 429 Too Many Requests, 502/503/504 Upstream Gateway Errors, socket timeouts. Eligible for automated retry.
-   - *Fatal Errors (`FatalEmailProviderError`, `EmailPayloadValidationError`):* Invalid recipient syntax, missing required fields (e.g., missing `order_number` in `ORDER_CONFIRMATION`), blacklisted addresses. Non-retryable; routed immediately to Dead-Letter Queue.
-2. **Exponential Backoff with Full Jitter:**
-   $$\text{delay} = \min(300, \text{base} \times 2^{\text{retry\_count}} + \text{uniform}(0.1, 1.0))$$
-   - Prevents retry synchronization (thundering herd) against recovering third-party mail APIs.
-3. **Dead-Letter Storage:**
-   When `max_retries` is reached or a fatal error occurs, the task writes a structured record to `DeadLetterEmailJob` capturing:
-   - Celery `task_id`
-   - `idempotency_key`
-   - `email_type`
-   - `recipient`
-   - `payload` (JSON)
-   - `failure_reason`
-   - `exception_class`
-   - `retry_count`
-   - Full `traceback`
-   - High-precision `created_at` timestamp
+### 3. Redis Failure Strategy (Fail-Closed)
+- When Redis is unavailable or raises network errors, the rate limiter **fails closed** (`allowed = False`).
+- **Rationale:** Failing open would flood the external email provider with 2,000 un-throttled emails during an outage, causing immediate provider suspension, IP blacklisting, and permanent notification drops.
+- Failing closed ensures that tasks are safely deferred with Celery countdowns until Redis connectivity is restored, preserving 100% of jobs without violating provider limits.
 
 ---
 
-### 3. Worker Crash Reliability Analysis (SIGKILL)
+### 4. How 500 Queued Jobs are Processed Safely
+During the 500-job stress test:
+1. **Window 1 (T = 0s to 60s):** The first 200 jobs acquire slots and are dispatched immediately (`SENT`). The remaining 300 jobs receive `allowed = False` and are rescheduled with Celery countdowns matching their `retry_after_seconds`.
+2. **Retry Budget Preservation:** Rate-limit deferrals do **not** increment `provider_retries`. Deferrals are volume throttling events, not provider faults; tasks preserve their full 5-attempt retry budget and never land in the Dead-Letter Queue due to queue depth.
+3. **Window 2 (T = 60s to 120s):** As initial reservations slide out of the 60-second window, capacity opens up. The next 200 deferred jobs execute and reach `SENT`.
+4. **Window 3 (T = 120s to 180s):** The final 100 deferred jobs execute and reach `SENT`.
+5. **Outcome:** Exactly 500 emails delivered, 0 duplicates, 0 dropped jobs, and 0 entries in the Dead-Letter Queue.
 
-#### Question: What happens if a Celery worker process receives SIGKILL while processing a task?
+---
 
-When a worker process receives `SIGKILL`, the process is terminated immediately by the operating system kernel. Operating system signal handlers do not run. Our implementation guarantees zero job loss and zero duplicate emails through four coordinating mechanisms:
-
-1. **`task_acks_late = True`:**
-   By default, Celery acknowledges messages upon popping them off the Redis broker *before* execution starts (`acks_early`). If a worker is killed via `SIGKILL` mid-run, the task is permanently lost. By setting `task_acks_late = True`, the `ACK` is deferred until after the Python task function has completed successfully and returned its result.
-2. **`task_reject_on_worker_lost = True`:**
-   The Celery supervisor process continuously monitors child worker processes. If a child dies abruptly (from `SIGKILL`, segmentation fault, or kernel OOM), the supervisor intercepts the exit code and issues a `NACK` / `REJECT` with `requeue=True` to Redis, instantly returning the task to the queue for another worker.
-3. **`worker_prefetch_multiplier = 1`:**
-   Ensures each worker slot prefetches at most 1 task, preventing worker starvation and task hoarding during sudden burst spikes.
-4. **Redis Broker `visibility_timeout` (3600s):**
-   If catastrophic host failure kills both child worker and supervisor, Redis monitors the unacknowledged queue. If no ACK is received within the visibility window, Redis safely re-queues the message.
-
-#### The 5 Specific Questions Answered:
-1. **What happens to an in-flight task when a worker crashes?**
-   The task remains unacknowledged in Redis. When the supervisor detects child termination, it sends a reject command with `requeue=True`, returning the task to the active queue.
-2. **When will the task be delivered again?**
-   Immediately upon supervisor process detection, or after `visibility_timeout` (3,600 seconds) if the entire server/container halted.
-3. **How do we prevent duplicate email side effects?**
-   Because the worker might have died *after* communicating with the email provider but *before* transmitting the ACK, re-delivery creates a duplicate execution risk. We eliminate this via `IdempotencyManager`: before dispatching, the task inspects `EmailDeliveryLog` where `idempotency_key` is marked `SENT`. If already sent, the task returns `ALREADY_SENT` without contacting the provider again.
-4. **Why exactly-once processing cannot simply be assumed?**
-   Under the Two Generals' Problem, physical network boundaries prevent atomic synchronization between third-party SMTP/API networks and local Redis broker queues. Hence, distributed architectures guarantee **at-least-once delivery**, which requires application-layer idempotency to achieve effective exactly-once external side effects.
-5. **What reliability guarantee does our implementation provide?**
-   **At-least-once message delivery with idempotent execution semantics**, guaranteeing zero job loss, resilience across worker crashes (`SIGKILL`), exponential backoff retries with jitter, and comprehensive dead-letter capture.
+### 5. Worker Crash Reliability (SIGKILL Analysis)
+- **`task_acks_late = True`:** Prevents job loss by holding message acknowledgment in Redis until task execution successfully completes.
+- **`task_reject_on_worker_lost = True`:** Supervisor catches abrupt worker process deaths (`SIGKILL`, OOM) and issues a `NACK` with `requeue=True` to Redis.
+- **`worker_prefetch_multiplier = 1`:** Workers take 1 task at a time, preventing worker starvation and task hoarding during bursts.
+- **Idempotency Invariant:** Re-delivered tasks inspect `EmailDeliveryLog` where `idempotency_key` is marked `SENT`. If already sent, the task returns `ALREADY_SENT` without contacting the provider again.
 
 ---
 
 ## SECTION 3: WRITTEN ARCHITECTURE REVIEW
-*(Will be finalized as part of comprehensive submission review.)*
 
+### Question A — Django Admin Performance (500,000+ Records)
+A client reports their Django admin page loads slowly when there are 500,000+ records in a table, despite an index on the primary key.
+
+#### Three Root Causes and Exact Solutions:
+
+1. **Root Cause 1: Relational N+1 Queries on `ModelAdmin` List Display**
+   - *Problem:* When `list_display` renders foreign keys (e.g. `customer`, `category`), Django admin issues a separate SQL query for every row rendered on the page (e.g. 100 queries per page).
+   - *Fix:* Configure `list_select_related = ('customer', 'category')` on the `ModelAdmin` class. This forces Django admin to execute an `INNER JOIN` in the primary query, fetching all related records in a single query.
+
+2. **Root Cause 2: Exact Count Overhead (`SELECT COUNT(*)`) on Massive PostgreSQL Tables**
+   - *Problem:* Django admin's paginator executes `SELECT COUNT(*)` on every page load to render total records and page numbers. In MVCC databases like PostgreSQL, `COUNT(*)` performs an expensive sequential scan across all 500,000+ rows.
+   - *Fix:* Set `show_full_result_count = False` on the `ModelAdmin`. Additionally, substitute Django's default paginator with a fast estimated paginator by overriding `paginator = ApproximatePaginator` using PostgreSQL's `pg_class.reltuples` system catalog:
+     ```python
+     class ApproximatePaginator(Paginator):
+         @cached_property
+         def count(self):
+             with connection.cursor() as cursor:
+                 cursor.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = %s", [self.object_list.model._meta.db_table])
+                 return cursor.fetchone()[0]
+     ```
+
+3. **Root Cause 3: Foreign Key Dropdown Rendering in Admin Change Forms**
+   - *Problem:* When editing an order, Django admin renders foreign key fields (`customer`, `product`) as HTML `<select>` dropdowns. For 500,000 records, Django evaluates `Customer.objects.all()`, instantiating 500,000 Python model objects and rendering a 40 MB HTML select element, exhausting memory.
+   - *Fix:* Replace dropdowns with search widgets or raw IDs using:
+     `raw_id_fields = ('customer', 'product')` or `autocomplete_fields = ('customer', 'product')` with `search_fields` enabled on the referenced `ModelAdmin`.
+
+---
+
+### Question B — Pagination Trade-offs: Offset-based vs. Cursor-based Pagination
+Adding pagination to an API returning 10,000 records presents critical architectural trade-offs between offset-based and cursor-based pagination.
+
+#### 1. Real-World Consequences at Scale:
+- **Offset-based Pagination (`OFFSET N LIMIT M`):**
+  - *Database Scan Behavior:* The database engine must scan all $N$ records before discarding them and returning $M$ rows. At `OFFSET 1000000`, the database scans 1,000,020 rows, resulting in $\mathcal{O}(N)$ sequential disk reads and linear latency degradation.
+  - *Data Mutation & Drift:* If a user is browsing page 2 and an item is inserted or deleted on page 1, rows shift. The user experiences duplicate records or skipped records during infinite scroll.
+- **Cursor-based Pagination (`WHERE id < cursor ORDER BY id DESC LIMIT M`):**
+  - *Database Scan Behavior:* Uses a B-Tree index seek directly to the cursor value (`id` or indexed timestamp), executing in $\mathcal{O}(\log N + M)$ constant time regardless of whether browsing row 10 or row 10,000,000.
+  - *Data Mutation Stability:* Inserting or deleting items does not shift the cursor boundary. Infinite scroll never displays duplicate or missed items.
+
+#### 2. Trade-offs & Selection Criteria:
+- **Choose Cursor-based Pagination:** For mobile app infinite scroll, high-frequency mutation feeds (social feeds, transaction histories), and large dataset exports ($>50,000$ records).
+  - *Sacrifice:* Cannot jump directly to arbitrary page numbers (e.g. "jump to page 47").
+- **Choose Offset-based Pagination:** For internal administrative tables with small datasets ($<10,000$ records) where direct page navigation ("Go to page 5") and multi-column sorting are required.
+
+---
+
+### Question C — File Upload Security: Five Distinct Attack Vectors & Django Application Mitigations
+
+A security audit flags a file upload endpoint as high-risk. Below are five distinct attack vectors and their Django application-layer mitigations (excluding CDN/WAF):
+
+1. **Remote Code Execution (RCE) via Malicious Extension (.py, .php, .exe, .sh)**
+   - *Attack:* Attacker uploads `exploit.py` or `webshell.php` to media storage and invokes it via web URL.
+   - *Django Mitigation:* Enforce an explicit extension allowlist in Django form/serializer validation (e.g. `ALLOWED_EXTENSIONS = {'.png', '.jpg', '.pdf'}`). Furthermore, store uploaded files using a randomized UUID filename (`upload_to=random_uuid_filename`) rather than user-supplied filenames, completely neutralizing executable script naming.
+
+2. **MIME-Type Spoofing & Polyglot Files (Content Sniffing)**
+   - *Attack:* Attacker uploads an executable script disguised with a `.jpg` extension and `image/jpeg` `Content-Type` header.
+   - *Django Mitigation:* Validate file magic bytes in Python using `python-magic` (`magic.from_buffer(file.read(2048), mime=True)`). Reject any file whose parsed magic bytes do not match the expected MIME type. For images, re-encode uploaded images using Pillow (`Image.open(file).save(...)`), which strips embedded malicious payloads.
+
+3. **Path Traversal Attacks (`../../etc/passwd`)**
+   - *Attack:* Attacker passes `filename="../../../etc/cron.d/malicious"` to overwrite system files outside the media directory.
+   - *Django Mitigation:* Sanitize filenames through Django’s `django.utils.text.get_valid_filename(file.name)`. Django’s `FileSystemStorage` automatically resolves canonical paths and raises `SuspiciousFileOperation` if the target path escapes the `MEDIA_ROOT` boundary.
+
+4. **Decompression / Storage Exhaustion (Zip Bombs & Excessive Allocation)**
+   - *Attack:* Attacker uploads a 10 KB compressed zip file that decompresses into 500 GB of zeros, crashing the server disk.
+   - *Django Mitigation:* Implement pre-upload file size checks inside `clean_file()`:
+     ```python
+     MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+     if file.size > MAX_UPLOAD_SIZE:
+         raise ValidationError("File exceeds maximum allowed size of 10 MB.")
+     ```
+     For zip files, inspect `ZipInfo.file_size` before uncompressing and enforce a strict ratio threshold.
+
+5. **Cross-Site Scripting (XSS) via SVG Uploads**
+   - *Attack:* Attacker uploads an `.svg` vector image containing `<script>alert(document.cookie)</script>`, which executes in a victim’s browser session upon opening.
+   - *Django Mitigation:* Disallow raw SVG uploads unless passed through an XML sanitizer (such as `defusedxml` and `bleach`) that purges `<script>`, `<foreignObject>`, and JavaScript event handlers (`onload`, `onerror`). Serve user files with `Content-Disposition: attachment` to force download rather than inline browser rendering.

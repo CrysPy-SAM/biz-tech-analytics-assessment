@@ -105,6 +105,9 @@ else:
         "default": {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / os.getenv("DB_NAME", "db.sqlite3"),
+            "OPTIONS": {
+                "timeout": 60,
+            },
         }
     }
 

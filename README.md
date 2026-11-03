@@ -193,6 +193,58 @@ Or open Django Admin at `http://127.0.0.1:8000/admin/` and navigate to:
 
 ## Running the Automated Test Suite
 
+Run the complete test suite across Section 1, Section 2, the Atomic Rate Limiter, and the 500-Job Stress Test:
+```bash
+pytest
+```
+*Current test suite:* **32 passed, 1 skipped in ~25.7 seconds**.
+
+```
+collected 33 items
+
+section-1-django-debugging/orders/tests/test_orders_summary.py (7 tests) . PASSED
+section-2-job-queue/tests/test_services.py (5 tests) .................... PASSED
+section-2-job-queue/tests/test_idempotency.py (2 tests) ................. PASSED
+section-2-job-queue/tests/test_dead_letter.py (1 test) .................. PASSED
+section-2-job-queue/tests/test_worker_reliability.py (3 tests) .......... PASSED
+section-2-job-queue/tests/test_email_tasks.py (6 tests) ................. PASSED
+section-2-job-queue/tests/test_rate_limiter.py (5 tests) ................ PASSED
+section-2-job-queue/tests/test_stress_500_jobs.py (3 tests) ............. PASSED
+section-2-job-queue/tests/test_real_redis_integration.py (1 test) ....... SKIPPED (Docker Redis daemon offline)
+```
+
+### Running Specific Test Suites
+
+```bash
+# 1. Run the 500-Job Flash Sale Stress Test
+pytest section-2-job-queue/tests/test_stress_500_jobs.py -v
+
+# 2. Run the Atomic Sliding Window Rate Limiter Unit Tests
+pytest section-2-job-queue/tests/test_rate_limiter.py -v
+
+# 3. Run Real Redis Integration Tests (when Redis is running on localhost:6379 or Docker)
+pytest section-2-job-queue/tests/test_real_redis_integration.py -v
+```
+
+---
+
+## Inspecting Redis Rate Limit & Queue State
+
+When running in Docker Compose or against a live Redis daemon:
+```bash
+# Inspect active reservations in the rolling 60-second window
+redis-cli zcard email:rate_limit:provider
+
+# View timestamps of the oldest and newest reservations
+redis-cli zrange email:rate_limit:provider 0 -1 WITHSCORES
+
+# Inspect key TTL (auto-cleans up after inactivity)
+redis-cli pttl email:rate_limit:provider
+
+# Inspect Dead-Letter Queue stream in Redis
+redis-cli lrange dlq:transactional_emails 0 -1
+```
+
 Run the complete test suite across Section 1 and Section 2:
 ```bash
 pytest

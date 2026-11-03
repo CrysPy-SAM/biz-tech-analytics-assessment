@@ -14,6 +14,7 @@ from services.email_provider import (
 from services.dead_letter import DeadLetterService
 from services.idempotency import IdempotencyManager
 from services.rate_limiter_interface import get_rate_limiter
+from services.redis_rate_limiter import RateLimitResult
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 BASE_RETRY_DELAY = 2  # Seconds
 MAX_RETRY_DELAY = 300  # 5 minutes maximum backoff
 DEFAULT_MAX_RETRIES = getattr(settings, "CELERY_MAX_RETRIES", 5)
+RATE_LIMIT_PROVIDER_KEY = "email:rate_limit:provider"
 
 
 def calculate_exponential_backoff(retry_count: int, base: float = BASE_RETRY_DELAY) -> float:
@@ -46,43 +48,118 @@ def send_transactional_email_task(
     recipient: str,
     payload: Dict[str, Any],
     idempotency_key: Optional[str] = None,
+    provider_retries: int = 0,
+    rate_limit_deferrals: int = 0,
 ) -> Dict[str, Any]:
     """
-    Asynchronous Celery task for reliable transactional email delivery.
+    Asynchronous Celery task for reliable, rate-limited transactional email delivery.
 
-    Reliability Invariants:
-    1. Worker Crash Resilience: acks_late=True and reject_on_worker_lost=True ensure
-       tasks killed via SIGKILL are re-queued rather than lost.
-    2. Idempotency: Duplicate executions (from retry or worker crash re-delivery)
-       are deduplicated and will not send duplicate emails.
-    3. Exponential Backoff: Temporary provider failures retry with full jitter.
-    4. Dead-Letter Queue (DLQ): Fatal errors and exhausted retries are recorded
-       with full diagnostic metadata.
+    Execution Workflow:
+    1. Validate payload format (fatal errors route to DLQ immediately).
+    2. Check idempotency (duplicate deliveries return ALREADY_SENT without consuming slots).
+    3. Reserve slot via atomic Redis Sliding Window Rate Limiter.
+    4. If denied: Defer task safely via Celery countdown WITHOUT consuming provider retry budget.
+    5. If allowed: Dispatch through EmailService.
+    6. If provider transiently fails: Exponential backoff retry.
+    7. If provider fatal/exhausted: Route to Dead-Letter Queue.
     """
     task_id = self.request.id or "direct_call"
-    retries = self.request.retries
+    retries = max(getattr(self.request, "retries", 0), provider_retries)
 
-    # Generate default deterministic idempotency key if none provided
+    # 1. Deterministic idempotency key generation
     if not idempotency_key:
-        unique_identifier = payload.get("order_number") or payload.get("otp_code") or payload.get("account_id") or task_id
+        unique_identifier = (
+            payload.get("order_number")
+            or payload.get("otp_code")
+            or payload.get("account_id")
+            or task_id
+        )
         idempotency_key = f"{email_type}:{recipient}:{unique_identifier}"
 
     logger.info(
-        f"[Task {task_id}] Processing {email_type} to {recipient} (Attempt {retries + 1}/{self.max_retries + 1})"
+        f"[Task {task_id}] Received {email_type} -> {recipient} "
+        f"(Provider attempt {retries + 1}/{DEFAULT_MAX_RETRIES + 1}, Deferrals: {rate_limit_deferrals})"
     )
 
-    # 1. Rate limiter check (Interface prepared for Part 3)
+    # 2. Strict Payload Validation upfront
+    try:
+        EmailService.validate_payload(email_type, recipient, payload)
+    except EmailPayloadValidationError as val_err:
+        logger.error(f"[Task {task_id}] Validation failed: {val_err}. Routing to Dead-Letter Queue.")
+        DeadLetterService.record_permanent_failure(
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            email_type=email_type,
+            recipient=recipient,
+            payload=payload,
+            failure_reason=str(val_err),
+            exception_class=val_err.__class__.__name__,
+            retry_count=retries,
+            traceback_str=traceback.format_exc(),
+        )
+        return {
+            "status": "DEAD_LETTER",
+            "reason": str(val_err),
+            "idempotency_key": idempotency_key,
+            "retry_count": retries,
+        }
+
+    # 3. Idempotency Check: Don't consume rate limit or resend if already SENT
+    if IdempotencyManager.is_already_sent(idempotency_key):
+        logger.info(f"[Task {task_id}] Key '{idempotency_key}' already SENT. Deduplicating.")
+        return {
+            "status": "ALREADY_SENT",
+            "idempotency_key": idempotency_key,
+        }
+
+    # 4. Atomic Redis Sliding Window Rate Limiter Reservation
     rate_limiter = get_rate_limiter()
-    if not rate_limiter.acquire("ratelimit:email_provider", max_limit=200, window_seconds=60):
-        # Local rate limit reached; schedule retry with small backoff
-        logger.warning(f"[Task {task_id}] Rate limiter throttled dispatch. Scheduling retry.")
-        countdown = calculate_exponential_backoff(retries, base=1)
-        raise self.retry(
-            exc=TransientEmailProviderError("Local rate limit capacity reached"),
-            countdown=countdown,
+    if hasattr(rate_limiter, "acquire_detailed"):
+        rl_res = rate_limiter.acquire_detailed(
+            key=RATE_LIMIT_PROVIDER_KEY,
+            max_limit=200,
+            window_seconds=60,
+        )
+    else:
+        allowed = rate_limiter.acquire(RATE_LIMIT_PROVIDER_KEY, max_limit=200, window_seconds=60)
+        rl_res = RateLimitResult(allowed=allowed, retry_after_ms=1000 if not allowed else 0, current_count=0, reservation_id="")
+
+    if not rl_res.allowed:
+        # CAPACITY REACHED: Safe deferral WITHOUT burning provider retry count
+        countdown = max(1.0, round(rl_res.retry_after_ms / 1000.0, 2))
+        logger.warning(
+            f"[Task {task_id}] Provider rate limit reached (Current: {rl_res.current_count}/200). "
+            f"Deferring task for {countdown}s. (Deferral #{rate_limit_deferrals + 1})"
         )
 
-    # 2. Process and dispatch via EmailService
+        IdempotencyManager.release_lock(idempotency_key)
+
+        # Reschedule for future window if in live Celery environment
+        if hasattr(self, "request") and self.request.id:
+            try:
+                # Re-queue task using Celery countdown
+                send_transactional_email_task.apply_async(
+                    kwargs={
+                        "email_type": email_type,
+                        "recipient": recipient,
+                        "payload": payload,
+                        "idempotency_key": idempotency_key,
+                        "provider_retries": retries,
+                        "rate_limit_deferrals": rate_limit_deferrals + 1,
+                    },
+                    countdown=countdown,
+                )
+            except Exception as sched_err:
+                logger.warning(f"Failed to apply_async deferred task: {sched_err}")
+
+        return {
+            "status": "DEFERRED",
+            "retry_after_seconds": countdown,
+            "idempotency_key": idempotency_key,
+            "rate_limit_deferrals": rate_limit_deferrals + 1,
+        }
+
+    # 5. Rate limit reservation confirmed -> Dispatch via EmailService
     try:
         result = EmailService.process_and_send(
             task_id=task_id,
@@ -93,9 +170,8 @@ def send_transactional_email_task(
         )
         return result
 
-    except (EmailPayloadValidationError, FatalEmailProviderError) as fatal_err:
-        # Non-recoverable fatal errors must NOT be retried; dispatch to DLQ immediately
-        logger.error(f"[Task {task_id}] Permanent fatal error: {fatal_err}. Moving to Dead-Letter Queue.")
+    except FatalEmailProviderError as fatal_err:
+        logger.error(f"[Task {task_id}] Permanent provider fatal error: {fatal_err}. Moving to DLQ.")
         DeadLetterService.record_permanent_failure(
             task_id=task_id,
             idempotency_key=idempotency_key,
@@ -115,11 +191,10 @@ def send_transactional_email_task(
         }
 
     except (TransientEmailProviderError, Exception) as transient_err:
-        # Check if maximum retries reached
+        # Check if maximum retries reached for upstream provider failures
         if retries >= self.max_retries:
             logger.error(
-                f"[Task {task_id}] Maximum retries ({self.max_retries}) exceeded. "
-                f"Moving task to Dead-Letter Queue."
+                f"[Task {task_id}] Maximum retries ({self.max_retries}) exhausted: {transient_err}. Moving to DLQ."
             )
             DeadLetterService.record_permanent_failure(
                 task_id=task_id,
@@ -139,15 +214,11 @@ def send_transactional_email_task(
                 "retry_count": retries,
             }
 
-        # Calculate exponential backoff countdown with jitter
         countdown = calculate_exponential_backoff(retries, base=BASE_RETRY_DELAY)
         logger.warning(
-            f"[Task {task_id}] Transient failure ({transient_err}). "
-            f"Scheduling retry {retries + 1}/{self.max_retries} in {countdown:.2f} seconds."
+            f"[Task {task_id}] Upstream provider error ({transient_err}). "
+            f"Scheduling retry {retries + 1}/{self.max_retries} in {countdown:.2f}s."
         )
 
-        # Release lock so retry attempt can execute
         IdempotencyManager.release_lock(idempotency_key)
-
-        # Re-raise via Celery retry
         raise self.retry(exc=transient_err, countdown=countdown)

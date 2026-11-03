@@ -15,6 +15,8 @@ class IdempotencyManager:
     do not trigger duplicate external email transmissions.
     """
 
+    _shared_fake_redis = None
+
     @classmethod
     def get_redis_client(cls):
         """Retrieves configured Redis client or None if unreachable."""
@@ -22,10 +24,16 @@ class IdempotencyManager:
             import redis
 
             redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
-            client = redis.Redis.from_url(redis_url, socket_timeout=1)
+            client = redis.Redis.from_url(redis_url, socket_timeout=0.2)
             client.ping()
             return client
         except Exception:
+            if getattr(settings, "IS_TESTING", False):
+                import fakeredis
+
+                if cls._shared_fake_redis is None:
+                    cls._shared_fake_redis = fakeredis.FakeRedis()
+                return cls._shared_fake_redis
             return None
 
     @classmethod
@@ -79,3 +87,8 @@ class IdempotencyManager:
     def reset_in_memory_store(cls):
         """Helper for test cleanup."""
         _memory_idempotency_store.clear()
+        if cls._shared_fake_redis is not None:
+            try:
+                cls._shared_fake_redis.flushall()
+            except Exception:
+                pass
