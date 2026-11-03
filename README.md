@@ -245,23 +245,6 @@ redis-cli pttl email:rate_limit:provider
 redis-cli lrange dlq:transactional_emails 0 -1
 ```
 
-Run the complete test suite across Section 1 and Section 2:
-```bash
-pytest
-```
-*Current test suite:* **24 passed tests in ~2.8 seconds**.
-
-```
-collected 24 items
-
-section-1-django-debugging/orders/tests/test_orders_summary.py (7 tests) ... PASSED
-section-2-job-queue/tests/test_services.py (5 tests) .................... PASSED
-section-2-job-queue/tests/test_idempotency.py (2 tests) ................. PASSED
-section-2-job-queue/tests/test_dead_letter.py (1 test) ................... PASSED
-section-2-job-queue/tests/test_worker_reliability.py (3 tests) .......... PASSED
-section-2-job-queue/tests/test_email_tasks.py (6 tests) ................. PASSED
-```
-
 ---
 
 ## Architectural Documentation

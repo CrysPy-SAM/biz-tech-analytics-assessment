@@ -99,7 +99,7 @@ pytest section-2-job-queue/tests
 # Run complete assessment suite (Section 1 + Section 2)
 pytest
 ```
-*Current status:* **24 passed tests in ~2.8 seconds**.
+*Current status:* **25 passed, 1 skipped in Section 2 (32 passed, 1 skipped across entire project)**.
 
 ### Triggering a Task Programmatically
 ```python

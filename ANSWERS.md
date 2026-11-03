@@ -167,78 +167,50 @@ During the 500-job stress test:
 
 ## SECTION 3: WRITTEN ARCHITECTURE REVIEW
 
-### Question A — Django Admin Performance (500,000+ Records)
-A client reports their Django admin page loads slowly when there are 500,000+ records in a table, despite an index on the primary key.
-
-#### Three Root Causes and Exact Solutions:
-
-1. **Root Cause 1: Relational N+1 Queries on `ModelAdmin` List Display**
-   - *Problem:* When `list_display` renders foreign keys (e.g. `customer`, `category`), Django admin issues a separate SQL query for every row rendered on the page (e.g. 100 queries per page).
-   - *Fix:* Configure `list_select_related = ('customer', 'category')` on the `ModelAdmin` class. This forces Django admin to execute an `INNER JOIN` in the primary query, fetching all related records in a single query.
-
-2. **Root Cause 2: Exact Count Overhead (`SELECT COUNT(*)`) on Massive PostgreSQL Tables**
-   - *Problem:* Django admin's paginator executes `SELECT COUNT(*)` on every page load to render total records and page numbers. In MVCC databases like PostgreSQL, `COUNT(*)` performs an expensive sequential scan across all 500,000+ rows.
-   - *Fix:* Set `show_full_result_count = False` on the `ModelAdmin`. Additionally, substitute Django's default paginator with a fast estimated paginator by overriding `paginator = ApproximatePaginator` using PostgreSQL's `pg_class.reltuples` system catalog:
-     ```python
-     class ApproximatePaginator(Paginator):
-         @cached_property
-         def count(self):
-             with connection.cursor() as cursor:
-                 cursor.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = %s", [self.object_list.model._meta.db_table])
-                 return cursor.fetchone()[0]
-     ```
-
-3. **Root Cause 3: Foreign Key Dropdown Rendering in Admin Change Forms**
-   - *Problem:* When editing an order, Django admin renders foreign key fields (`customer`, `product`) as HTML `<select>` dropdowns. For 500,000 records, Django evaluates `Customer.objects.all()`, instantiating 500,000 Python model objects and rendering a 40 MB HTML select element, exhausting memory.
-   - *Fix:* Replace dropdowns with search widgets or raw IDs using:
-     `raw_id_fields = ('customer', 'product')` or `autocomplete_fields = ('customer', 'product')` with `search_fields` enabled on the referenced `ModelAdmin`.
+*(Per assessment guidelines, two questions have been selected: **Question B** and **Question C**, each strictly containing between 200 and 350 words.)*
 
 ---
 
-### Question B — Pagination Trade-offs: Offset-based vs. Cursor-based Pagination
-Adding pagination to an API returning 10,000 records presents critical architectural trade-offs between offset-based and cursor-based pagination.
+### Question B: Offset vs Cursor Pagination
+*(Word count: 292 words | Assessment limit: 200–350 words)*
 
-#### 1. Real-World Consequences at Scale:
-- **Offset-based Pagination (`OFFSET N LIMIT M`):**
-  - *Database Scan Behavior:* The database engine must scan all $N$ records before discarding them and returning $M$ rows. At `OFFSET 1000000`, the database scans 1,000,020 rows, resulting in $\mathcal{O}(N)$ sequential disk reads and linear latency degradation.
-  - *Data Mutation & Drift:* If a user is browsing page 2 and an item is inserted or deleted on page 1, rows shift. The user experiences duplicate records or skipped records during infinite scroll.
-- **Cursor-based Pagination (`WHERE id < cursor ORDER BY id DESC LIMIT M`):**
-  - *Database Scan Behavior:* Uses a B-Tree index seek directly to the cursor value (`id` or indexed timestamp), executing in $\mathcal{O}(\log N + M)$ constant time regardless of whether browsing row 10 or row 10,000,000.
-  - *Data Mutation Stability:* Inserting or deleting items does not shift the cursor boundary. Infinite scroll never displays duplicate or missed items.
+Offset pagination calculates position using an index offset: `SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 10000` (in DRF, `PageNumberPagination`). Cursor pagination anchors retrieval to a unique, sequential pointer: `SELECT * FROM orders WHERE id < 8452 ORDER BY id DESC LIMIT 20` (in DRF, `CursorPagination`).
 
-#### 2. Trade-offs & Selection Criteria:
-- **Choose Cursor-based Pagination:** For mobile app infinite scroll, high-frequency mutation feeds (social feeds, transaction histories), and large dataset exports ($>50,000$ records).
-  - *Sacrifice:* Cannot jump directly to arbitrary page numbers (e.g. "jump to page 47").
-- **Choose Offset-based Pagination:** For internal administrative tables with small datasets ($<10,000$ records) where direct page navigation ("Go to page 5") and multi-column sorting are required.
+When an API scales to 10,000+ records, offset pagination degrades severely. Relational databases execute `OFFSET N` by scanning and sorting all $N$ records before discarding them, yielding $\mathcal{O}(N)$ sequential I/O cost and linear latency growth. Conversely, cursor pagination uses a B-Tree index seek directly on the cursor column, executing in $\mathcal{O}(\log N + M)$ constant time regardless of dataset size.
+
+For mobile infinite scrolling, offset pagination causes severe data drift. Because offsets are positional rather than identity-based:
+- **Insertions:** If a new record is created while a user scrolls from page 1 to page 2, existing rows shift downward. The last record of page 1 shifts into the first position of page 2, showing the mobile user a duplicate record.
+- **Deletions:** If a record on page 1 is deleted, subsequent rows shift upward. The user skips a record entirely.
+
+Cursor pagination guarantees strict consistency during real-time mutations. Because the client requests records relative to an immutable value (`created_at`, `id`), newly inserted records remain behind or ahead of the cursor without displacing the relative window.
+
+**Decision Matrix:**
+- **Choose Cursor Pagination:** For mobile feeds, infinite scrolling, high-concurrency event streams, and large datasets (>10,000 rows) where constant response time and insertion consistency are mandatory. Trade-off: clients cannot navigate directly to arbitrary page numbers (e.g., 'jump to page 45').
+- **Choose Offset Pagination:** For internal dashboards and administrative tables with small datasets (<5,000 rows) where multi-column sorting, total page counts, and direct page navigation are required.
 
 ---
 
-### Question C — File Upload Security: Five Distinct Attack Vectors & Django Application Mitigations
+### Question C: File Upload Security
+*(Word count: 302 words | Assessment limit: 200–350 words)*
 
-A security audit flags a file upload endpoint as high-risk. Below are five distinct attack vectors and their Django application-layer mitigations (excluding CDN/WAF):
+A high-risk file upload endpoint exposes applications to severe vulnerabilities. Five distinct attack vectors and their Django application-layer mitigations include:
 
-1. **Remote Code Execution (RCE) via Malicious Extension (.py, .php, .exe, .sh)**
-   - *Attack:* Attacker uploads `exploit.py` or `webshell.php` to media storage and invokes it via web URL.
-   - *Django Mitigation:* Enforce an explicit extension allowlist in Django form/serializer validation (e.g. `ALLOWED_EXTENSIONS = {'.png', '.jpg', '.pdf'}`). Furthermore, store uploaded files using a randomized UUID filename (`upload_to=random_uuid_filename`) rather than user-supplied filenames, completely neutralizing executable script naming.
+1. **Remote Code Execution via Executable Uploads:**
+   - *Attack & Impact:* An attacker uploads a script (`shell.py`, `exploit.php`) executed by the web server or cron job, giving full server compromise.
+   - *Django Mitigation:* Disallow user extensions using an explicit allowlist in serializer validation. Store uploads with server-generated UUIDs (`upload_to=uuid_filename`) outside web roots and mount media storage with execution flags disabled (`noexec`).
 
-2. **MIME-Type Spoofing & Polyglot Files (Content Sniffing)**
-   - *Attack:* Attacker uploads an executable script disguised with a `.jpg` extension and `image/jpeg` `Content-Type` header.
-   - *Django Mitigation:* Validate file magic bytes in Python using `python-magic` (`magic.from_buffer(file.read(2048), mime=True)`). Reject any file whose parsed magic bytes do not match the expected MIME type. For images, re-encode uploaded images using Pillow (`Image.open(file).save(...)`), which strips embedded malicious payloads.
+2. **MIME-Type & Extension Spoofing:**
+   - *Attack & Impact:* Malicious binaries disguised with benign extensions (`exploit.jpg`) or spoofed `Content-Type: image/jpeg` bypass naive filename filters, executing during server-side processing or client-side sniffing.
+   - *Django Mitigation:* Inspect file magic headers in memory using `python-magic` (`magic.from_buffer(file.read(2048), mime=True)`). For images, re-encode files via Pillow (`Image.open(file).save(...)`), stripping polyglot shellcode and verifying true structure.
 
-3. **Path Traversal Attacks (`../../etc/passwd`)**
-   - *Attack:* Attacker passes `filename="../../../etc/cron.d/malicious"` to overwrite system files outside the media directory.
-   - *Django Mitigation:* Sanitize filenames through Django’s `django.utils.text.get_valid_filename(file.name)`. Django’s `FileSystemStorage` automatically resolves canonical paths and raises `SuspiciousFileOperation` if the target path escapes the `MEDIA_ROOT` boundary.
+3. **Path Traversal via Unsanitized Filenames:**
+   - *Attack & Impact:* Supplying `filename="../../etc/cron.d/backdoor"` overwrites critical operating system files or configuration.
+   - *Django Mitigation:* Pass names through `django.utils.text.get_valid_filename()`. Django's `FileSystemStorage` automatically resolves canonical paths and raises `SuspiciousFileOperation` if a file attempts to escape `MEDIA_ROOT`.
 
-4. **Decompression / Storage Exhaustion (Zip Bombs & Excessive Allocation)**
-   - *Attack:* Attacker uploads a 10 KB compressed zip file that decompresses into 500 GB of zeros, crashing the server disk.
-   - *Django Mitigation:* Implement pre-upload file size checks inside `clean_file()`:
-     ```python
-     MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
-     if file.size > MAX_UPLOAD_SIZE:
-         raise ValidationError("File exceeds maximum allowed size of 10 MB.")
-     ```
-     For zip files, inspect `ZipInfo.file_size` before uncompressing and enforce a strict ratio threshold.
+4. **Resource Exhaustion & Decompression Bombs:**
+   - *Attack & Impact:* Massive multi-gigabyte uploads or nested zip/pixel bombs exhaust server memory, CPU, and disk, causing Denial of Service (DoS).
+   - *Django Mitigation:* Enforce `DATA_UPLOAD_MAX_MEMORY_SIZE` and `FILE_UPLOAD_MAX_MEMORY_SIZE` in `settings.py`. Validate file bounds in Django forms (`if file.size > 10 * 1024 * 1024: raise ValidationError()`). Inspect image dimensions (`Image.open().size`) before full decoding.
 
-5. **Cross-Site Scripting (XSS) via SVG Uploads**
-   - *Attack:* Attacker uploads an `.svg` vector image containing `<script>alert(document.cookie)</script>`, which executes in a victim’s browser session upon opening.
-   - *Django Mitigation:* Disallow raw SVG uploads unless passed through an XML sanitizer (such as `defusedxml` and `bleach`) that purges `<script>`, `<foreignObject>`, and JavaScript event handlers (`onload`, `onerror`). Serve user files with `Content-Disposition: attachment` to force download rather than inline browser rendering.
+5. **Cross-Site Scripting (XSS) via Vector Graphics (SVG):**
+   - *Attack & Impact:* SVG files containing `<script>` or malicious XML entities (`<!ENTITY ...>`) execute in the victim's browser session or trigger XML External Entity (XXE) attacks.
+   - *Django Mitigation:* Reject SVG uploads or sanitize XML payloads using `defusedxml` and `bleach`. Serve all user-generated media with HTTP header `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`.
