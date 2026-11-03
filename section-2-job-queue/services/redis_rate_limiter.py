@@ -100,7 +100,7 @@ class RedisSlidingWindowRateLimiter(BaseRateLimiter):
             import redis
 
             redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
-            client = redis.Redis.from_url(redis_url, socket_timeout=0.2)
+            client = redis.Redis.from_url(redis_url, socket_timeout=2.0)
             client.ping()
             self._redis_client = client
             return client

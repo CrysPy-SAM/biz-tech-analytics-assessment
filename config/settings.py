@@ -5,6 +5,7 @@ Django settings for biz-tech-analytics-assessment project.
 from pathlib import Path
 import os
 import sys
+import urllib.parse
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -32,6 +33,8 @@ ALLOWED_HOSTS = [
 ]
 if "testserver" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append("testserver")
+if ".onrender.com" not in ALLOWED_HOSTS and any("onrender.com" in h for h in ALLOWED_HOSTS):
+    ALLOWED_HOSTS.append(".onrender.com")
 
 # Application definition
 INSTALLED_APPS = [
@@ -60,9 +63,12 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-# In test runs, bypass profiler interception so internal Silk logging does not skew query assertions
+# Silk profiler control
+SILK_PROFILER_ENABLED = os.getenv("SILK_PROFILER_ENABLED", "True").lower() in ("true", "1", "yes")
+
+# In test runs or when Silk is disabled in environment, bypass profiler interception
 IS_TESTING = "test" in sys.argv or any("pytest" in arg for arg in sys.argv)
-if IS_TESTING:
+if IS_TESTING or not SILK_PROFILER_ENABLED:
     MIDDLEWARE = [m for m in MIDDLEWARE if m != "silk.middleware.SilkyMiddleware"]
 
 ROOT_URLCONF = "config.urls"
@@ -86,10 +92,34 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 # Database configuration
-# Support PostgreSQL via env var or SQLite local fallback
-DB_ENGINE = os.getenv("DB_ENGINE", "django.db.backends.sqlite3")
+# Support PostgreSQL via DATABASE_URL (Render, Docker, Cloud) or SQLite local fallback
+DATABASE_URL = os.getenv("DATABASE_URL")
+DB_ENGINE = os.getenv("DB_ENGINE", "")
+IS_RENDER = os.getenv("RENDER", "false").lower() in ("true", "1") or any("onrender.com" in h for h in ALLOWED_HOSTS)
 
-if "postgresql" in DB_ENGINE:
+if DATABASE_URL and (IS_RENDER or not DEBUG or "postgres" in DB_ENGINE or not DB_ENGINE):
+    url = urllib.parse.urlsplit(DATABASE_URL)
+    engine = "django.db.backends.postgresql" if "postgres" in url.scheme else "django.db.backends.sqlite3"
+    db_name = url.path.lstrip("/")
+    DATABASES = {
+        "default": {
+            "ENGINE": engine,
+            "NAME": db_name,
+            "USER": urllib.parse.unquote(url.username or ""),
+            "PASSWORD": urllib.parse.unquote(url.password or ""),
+            "HOST": url.hostname or "",
+            "PORT": str(url.port or 5432),
+            "CONN_MAX_AGE": 600,
+        }
+    }
+    if url.query:
+        query_params = urllib.parse.parse_qs(url.query)
+        options = {}
+        if "sslmode" in query_params:
+            options["sslmode"] = query_params["sslmode"][0]
+        if options:
+            DATABASES["default"]["OPTIONS"] = options
+elif DB_ENGINE and "postgresql" in DB_ENGINE:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
@@ -154,8 +184,8 @@ SILKY_MAX_RECORDED_REQUESTS = 1000
 SILKY_IGNORE_PATHS = ["/silk/"]
 
 # Celery / Redis Settings
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
@@ -167,3 +197,39 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 3600}
 CELERY_MAX_RETRIES = int(os.getenv("CELERY_MAX_RETRIES", "5"))
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() in ("true", "1")
 CELERY_TASK_EAGER_PROPAGATES = True
+
+
+# Production Logging: Ensure Django error tracebacks are logged to console (captured by Render/Gunicorn)
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{asctime}] [{levelname}] [{name}] {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "stream": sys.stdout,
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django.db.backends": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}

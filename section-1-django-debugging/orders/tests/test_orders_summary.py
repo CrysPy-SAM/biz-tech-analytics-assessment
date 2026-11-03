@@ -270,3 +270,11 @@ class OrderSummaryAPITestCase(TestCase):
 
         # 3. Verify 100% data parity
         self.assertEqual(unopt_res.json(), opt_res.json())
+
+    def test_root_index_health_check(self):
+        """Verifies root endpoint '/' returns HTTP 200 healthy status and endpoint map."""
+        res = self.client.get("/")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        data = res.json()
+        self.assertEqual(data.get("status"), "healthy")
+        self.assertIn("orders_summary", data.get("endpoints", {}))
