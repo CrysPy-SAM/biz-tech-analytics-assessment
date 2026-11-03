@@ -15,3 +15,4 @@ urlpatterns = [
     # Live benchmark endpoint
     path("benchmark/", BenchmarkComparisonView.as_view(), name="order-benchmark"),
 ]
+

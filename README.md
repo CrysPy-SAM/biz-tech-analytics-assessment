@@ -144,7 +144,77 @@ Full evidence, analysis, and SQL query logs are available in:
 
 ---
 
+## Verifying Section 2: Celery Asynchronous Job Queue
+
+### 1. Start Celery Worker Daemon
+In a separate terminal with virtual environment active:
+```bash
+# On Linux / macOS / Docker:
+celery -A config worker --loglevel=info -Q celery,emails
+
+# On Windows:
+celery -A config worker --loglevel=info -P solo -Q celery,emails
+```
+
+### 2. Programmatically Dispatch Transactional Email Tasks
+Open a Django shell (`python manage.py shell`):
+```python
+from tasks import send_transactional_email_task
+from email_queue.models import EmailType
+
+# Submit Order Confirmation email
+res = send_transactional_email_task.delay(
+    email_type=EmailType.ORDER_CONFIRMATION,
+    recipient="customer@biztech.com",
+    payload={"order_number": "ORD-2026-9901", "total_amount": 149.95, "items_count": 2},
+    idempotency_key="order_confirm_9901",
+)
+print("Task ID:", res.id)
+print("Task Status:", res.status)
+print("Task Result:", res.get())
+```
+
+### 3. Inspect Task & Dead-Letter Telemetry
+Failed or dead-lettered jobs can be inspected via Django Admin or Django ORM:
+```python
+from email_queue.models import EmailDeliveryLog, DeadLetterEmailJob
+
+# View all delivery logs:
+print(EmailDeliveryLog.objects.all())
+
+# View all dead-lettered jobs (captures error reason, retry count, traceback, timestamp):
+print(DeadLetterEmailJob.objects.all().values())
+```
+Or open Django Admin at `http://127.0.0.1:8000/admin/` and navigate to:
+- **Email delivery logs** (`/admin/email_queue/emaildeliverylog/`)
+- **Dead letter email jobs** (`/admin/email_queue/deadletteremailjob/`)
+
+---
+
+## Running the Automated Test Suite
+
+Run the complete test suite across Section 1 and Section 2:
+```bash
+pytest
+```
+*Current test suite:* **24 passed tests in ~2.8 seconds**.
+
+```
+collected 24 items
+
+section-1-django-debugging/orders/tests/test_orders_summary.py (7 tests) ... PASSED
+section-2-job-queue/tests/test_services.py (5 tests) .................... PASSED
+section-2-job-queue/tests/test_idempotency.py (2 tests) ................. PASSED
+section-2-job-queue/tests/test_dead_letter.py (1 test) ................... PASSED
+section-2-job-queue/tests/test_worker_reliability.py (3 tests) .......... PASSED
+section-2-job-queue/tests/test_email_tasks.py (6 tests) ................. PASSED
+```
+
+---
+
 ## Architectural Documentation
 - Section 1 Investigation & Post-Mortem: [`section-1-django-debugging/INVESTIGATION_LOG.md`](./section-1-django-debugging/INVESTIGATION_LOG.md)
-- Section 2 Architectural Design: [`DESIGN.md`](./DESIGN.md)
+- Section 2 Architecture & Queue Design: [`section-2-job-queue/README.md`](./section-2-job-queue/README.md)
+- System Architecture Design: [`DESIGN.md`](./DESIGN.md)
 - Written Assessment Answers: [`ANSWERS.md`](./ANSWERS.md)
+

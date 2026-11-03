@@ -96,3 +96,4 @@
    - *Trade-off:* `prefetch_related` stores related objects in Python memory (`_prefetched_objects_cache`). For 250 orders (~1,000 items), this consumes negligible memory (< 2 MB) while reducing latency by 99.2%. For millions of records, pagination must be paired with prefetching.
 2. **Database CPU for Joins vs. Socket Overhead:**
    - *Trade-off:* Relational joins and annotations require modest database CPU for sorting and hashing. However, executing 3 set-based queries is orders of magnitude more efficient for PostgreSQL/SQLite than managing 5,000 network roundtrips and connection pool contention.
+

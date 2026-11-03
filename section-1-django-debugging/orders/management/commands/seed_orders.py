@@ -100,3 +100,4 @@ class Command(BaseCommand):
                 f"{len(order_items)} order items for customer '{customer.name}'."
             )
         )
+

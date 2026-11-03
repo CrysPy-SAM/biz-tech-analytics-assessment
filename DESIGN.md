@@ -96,3 +96,4 @@ To guarantee **zero message loss**, the Celery worker and broker are configured 
 - **Dead-Letter Handling (DLQ):**
   When a task exceeds its maximum retry threshold (e.g., 5 retries due to persistent recipient SMTP rejection or invalid format), it is moved to a dead-letter state:
   - Dispatches to a dedicated dead-letter queue or persists to `FailedJob` database model for engineering inspection and alert triage.
+

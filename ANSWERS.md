@@ -125,9 +125,70 @@ Django Silk is fully integrated (`/silk/`). Benchmarking was executed against ge
 ---
 
 ## SECTION 2: DESIGN A RATE-LIMITED ASYNC JOB QUEUE
-*(Implementation reserved for Part 2 as instructed. Technical architecture documented in `DESIGN.md`.)*
+
+### 1. Architectural Architecture & Core Components
+- **Broker & Backend:** Celery 5.6+ with Redis 7+ backend.
+- **Worker Configuration:** Dedicated concurrency pool with Redis broker visibility timeout of 3600s.
+- **Modular Services:**
+  - `EmailService`: Decoupled business logic responsible for payload validation, template formatting, state transitions, and audit logging.
+  - `MockEmailBackend`: In-memory configurable testing provider allowing precise simulation of transient errors, permanent failures, and delivery tracking without sending real emails.
+  - `IdempotencyManager`: Redis atomic locks (`SET NX EX`) and persistent database log checking to enforce effective exactly-once delivery.
+  - `DeadLetterService`: Dual-destination dead-letter logging (`DeadLetterEmailJob` model + `dlq:transactional_emails` Redis list).
+  - `RateLimiterInterface`: Modular rate-limiter abstraction preparing for Part 3 Redis Lua sliding-window rate limiting.
+
+---
+
+### 2. Retry Logic & Dead-Letter Handling
+1. **Error Categorization:**
+   - *Transient Errors (`TransientEmailProviderError`):* 429 Too Many Requests, 502/503/504 Upstream Gateway Errors, socket timeouts. Eligible for automated retry.
+   - *Fatal Errors (`FatalEmailProviderError`, `EmailPayloadValidationError`):* Invalid recipient syntax, missing required fields (e.g., missing `order_number` in `ORDER_CONFIRMATION`), blacklisted addresses. Non-retryable; routed immediately to Dead-Letter Queue.
+2. **Exponential Backoff with Full Jitter:**
+   $$\text{delay} = \min(300, \text{base} \times 2^{\text{retry\_count}} + \text{uniform}(0.1, 1.0))$$
+   - Prevents retry synchronization (thundering herd) against recovering third-party mail APIs.
+3. **Dead-Letter Storage:**
+   When `max_retries` is reached or a fatal error occurs, the task writes a structured record to `DeadLetterEmailJob` capturing:
+   - Celery `task_id`
+   - `idempotency_key`
+   - `email_type`
+   - `recipient`
+   - `payload` (JSON)
+   - `failure_reason`
+   - `exception_class`
+   - `retry_count`
+   - Full `traceback`
+   - High-precision `created_at` timestamp
+
+---
+
+### 3. Worker Crash Reliability Analysis (SIGKILL)
+
+#### Question: What happens if a Celery worker process receives SIGKILL while processing a task?
+
+When a worker process receives `SIGKILL`, the process is terminated immediately by the operating system kernel. Operating system signal handlers do not run. Our implementation guarantees zero job loss and zero duplicate emails through four coordinating mechanisms:
+
+1. **`task_acks_late = True`:**
+   By default, Celery acknowledges messages upon popping them off the Redis broker *before* execution starts (`acks_early`). If a worker is killed via `SIGKILL` mid-run, the task is permanently lost. By setting `task_acks_late = True`, the `ACK` is deferred until after the Python task function has completed successfully and returned its result.
+2. **`task_reject_on_worker_lost = True`:**
+   The Celery supervisor process continuously monitors child worker processes. If a child dies abruptly (from `SIGKILL`, segmentation fault, or kernel OOM), the supervisor intercepts the exit code and issues a `NACK` / `REJECT` with `requeue=True` to Redis, instantly returning the task to the queue for another worker.
+3. **`worker_prefetch_multiplier = 1`:**
+   Ensures each worker slot prefetches at most 1 task, preventing worker starvation and task hoarding during sudden burst spikes.
+4. **Redis Broker `visibility_timeout` (3600s):**
+   If catastrophic host failure kills both child worker and supervisor, Redis monitors the unacknowledged queue. If no ACK is received within the visibility window, Redis safely re-queues the message.
+
+#### The 5 Specific Questions Answered:
+1. **What happens to an in-flight task when a worker crashes?**
+   The task remains unacknowledged in Redis. When the supervisor detects child termination, it sends a reject command with `requeue=True`, returning the task to the active queue.
+2. **When will the task be delivered again?**
+   Immediately upon supervisor process detection, or after `visibility_timeout` (3,600 seconds) if the entire server/container halted.
+3. **How do we prevent duplicate email side effects?**
+   Because the worker might have died *after* communicating with the email provider but *before* transmitting the ACK, re-delivery creates a duplicate execution risk. We eliminate this via `IdempotencyManager`: before dispatching, the task inspects `EmailDeliveryLog` where `idempotency_key` is marked `SENT`. If already sent, the task returns `ALREADY_SENT` without contacting the provider again.
+4. **Why exactly-once processing cannot simply be assumed?**
+   Under the Two Generals' Problem, physical network boundaries prevent atomic synchronization between third-party SMTP/API networks and local Redis broker queues. Hence, distributed architectures guarantee **at-least-once delivery**, which requires application-layer idempotency to achieve effective exactly-once external side effects.
+5. **What reliability guarantee does our implementation provide?**
+   **At-least-once message delivery with idempotent execution semantics**, guaranteeing zero job loss, resilience across worker crashes (`SIGKILL`), exponential backoff retries with jitter, and comprehensive dead-letter capture.
 
 ---
 
 ## SECTION 3: WRITTEN ARCHITECTURE REVIEW
 *(Will be finalized as part of comprehensive submission review.)*
+

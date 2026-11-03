@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     "silk",
     # Local applications
     "orders.apps.OrdersConfig",
+    "email_queue.apps.EmailQueueConfig",
 ]
 
 MIDDLEWARE = [
@@ -149,10 +150,17 @@ SILKY_INTERCEPT_PERCENT = 0 if IS_TESTING else 100
 SILKY_MAX_RECORDED_REQUESTS = 1000
 SILKY_IGNORE_PATHS = ["/silk/"]
 
-# Celery / Redis Settings (Configured for Section 2 readiness)
+# Celery / Redis Settings
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 3600}
+CELERY_MAX_RETRIES = int(os.getenv("CELERY_MAX_RETRIES", "5"))
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() in ("true", "1")
+CELERY_TASK_EAGER_PROPAGATES = True

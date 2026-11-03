@@ -10,3 +10,4 @@ urlpatterns = [
     path("silk/", include("silk.urls", namespace="silk")),
     path("api/orders/", include("orders.urls")),
 ]
+

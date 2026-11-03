@@ -42,3 +42,4 @@ class OrderAdmin(admin.ModelAdmin):
 class OrderItemAdmin(admin.ModelAdmin):
     list_display = ("order", "product", "quantity", "unit_price")
     list_select_related = ("order", "product")
+

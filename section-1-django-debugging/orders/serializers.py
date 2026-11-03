@@ -90,3 +90,4 @@ class OptimizedOrderSummarySerializer(serializers.ModelSerializer):
         # Evaluates from prefetched collection in RAM (category is select_related)
         cats = {item.product.category.name for item in obj.items.all()}
         return sorted(list(cats))
+

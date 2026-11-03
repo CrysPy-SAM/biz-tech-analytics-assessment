@@ -10,6 +10,7 @@ def main():
     # Ensure section-1-django-debugging is in sys.path
     base_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(base_dir / "section-1-django-debugging"))
+    sys.path.insert(0, str(base_dir / "section-2-job-queue"))
     sys.path.insert(0, str(base_dir))
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
@@ -26,3 +27,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
